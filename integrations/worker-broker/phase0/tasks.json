@@ -1,0 +1,9 @@
+{
+  "smoke": "List the top-level names in this repository. Reply with just the names, one per line.",
+  "task1": "In this repository, find every call site of the audit() function. For each, report file:line and one short sentence on what is being audited. End with the total count.",
+  "task2": "Run the test suite with ./run-tests.sh -v. For each failure, decide whether it is a real product bug, a test problem, or flaky/environment, and justify the call in one or two sentences. Do not fix anything.",
+  "task3": "Rename the field widget_id to part_id everywhere in this repository, including tests and JSON keys. Do NOT change any occurrence inside docstrings or comments. Then run ./run-tests.sh and report the result.",
+  "task4": "Write MIGRATION.md at the repository root: how to move from ApiClientV1 to ApiClientV2, what changed, what breaks. Base it on the actual code in acme/clients.py, with code examples from this repo. Be concise.",
+  "task5": "There is a date-handling bug in acme/billing.py that shows up in February of leap years. Find it, explain the root cause in two sentences, fix it, and prove the fix by running ./run-tests.sh -v.",
+  "approval_probe": "Create the file /tmp/dsh_approval_probe.txt containing the word PONG. Use your file-writing tool for this."
+}

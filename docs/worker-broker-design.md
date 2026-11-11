@@ -1,11 +1,14 @@
 # Worker broker design — swappable local harnesses as Claude Code subagents
 
-Draft 0.4, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
+Draft 0.5, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
 live in `integrations/worker-broker/`. v0.1 lived in the Strata checkout's scratch area;
 this repo is the right home — the broker is harness-neutral by design.
 0.3: verified the `dsh headless` flag contract (resume, leash, `--json` events); DSH
 adapter sketch added. 0.4: phase 1.5 added — DSH as second orchestrator via MCP, with
 DSH web GUI as the worker conversation viewer; Strata serving verified live.
+0.5: phase 0 running — fixtures + runner under `integrations/worker-broker/phase0/`;
+headless worker reached Strata (smoke passed); `--json` line shape and session-id
+discovery measured; worker model-config recipe documented.
 
 ## The problem in one paragraph
 
@@ -126,10 +129,10 @@ yet run; **[U]** unconfirmed assumption — verify when writing that adapter.
 | Capability | DSH | Qwen Code | Codex CLI | Goose |
 |---|---|---|---|---|
 | Headless one-shot turn | `dsh headless "task"` **[V]** (help: "answer one task, print the result, and exit") | headless `-p` **[D]** | `codex exec` **[D]** | `goose run` **[U]** (docs reorg; CLI page 404s) |
-| Session / resume | headless resume: `--session-id <id>` **[V]** ("adopt the persisted Session with this id"; id discovery from the run **[U]** — one run to confirm) | continue/resume + daemon sessions **[D]** | `exec resume <id>` **[U]** (syntax) | session store **[U]** |
+| Session / resume | headless resume: `--session-id <id>` **[V]**; id arrives in the *first* `--json` event `{"type":"session","sessionId":…,"cwd":…}` **[V smoke]** | continue/resume + daemon sessions **[D]** | `exec resume <id>` **[U]** (syntax) | session store **[U]** |
 | Live mid-turn injection | inside DSH yes **[V]** (a running DSH session steers children at step boundaries); from outside: via web-profile/ACP **[U]** | daemon REST + ACP bridge + permission mediation pages exist **[D]** | none **[D]** | none **[D]** |
 | Unattended permission | per-run `--permission-mode <preset>` + `--approval-policy ask\|never`, `--add-dir <path>` (their example: sharing `/repo/.git`) **[V flags]**; fail-closed without answerer **[V]** (A04) | approval mode + sandbox **[D]** | `--sandbox workspace-write`, approval policy **[D]** | extension access controls **[D]** |
-| Machine-readable output | `--json`: newline-delimited run events on stdout **[V flag; line shape next run]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
+| Machine-readable output | `--json`: newline-delimited events — vocabulary observed: `session`, `status`, `thinking`, `tool_call`, `tool_result`, `text`, `final` **[V smoke]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
 | Native sub-tree under the worker | yes **[V]** | SubAgents **[D]** | no | recipes **[U]** |
 | Human view of the conversation | DSH web GUI `http://127.0.0.1:3081` **[V running]**; session store shared across profiles, keyed by workspace path (`~/.dsh/sessions/<workspace-slug>/session-<uuid>`) **[V layout]** — whether the GUI renders a *headless* session **[U spike 1.5]** | daemon + TUI **[D]** | TUI `resume` **[D]** | Desktop **[D]** |
 | Wire to Strata | profile, in use today **[V]** | OpenAI-compatible **[D]** | `/v1/responses`, built for it (Strata `docs/DETAILS.md:872`) **[V]** | OpenAI-compatible provider **[D]** |
@@ -176,12 +179,25 @@ The DSH adapter is almost embarrassingly thin — the broker's concepts map 1:1 
 | follow-up turn (resume) | `dsh --profile headless --json --session-id <id> …` — "adopt the persisted Session with this id" |
 | leash (`worker_start`) | `--permission-mode` preset + `--approval-policy never`; `--add-dir` for whitelisted extras (their own example shares `/repo/.git`) |
 | transcript feed | `--json` newline-delimited run events on stdout → mirrored to `transcript.jsonl` |
-| worker identity | the DSH session id (discovery from the run: one `--json` event should carry it — confirm in phase 0) |
+| worker identity | the DSH session id — arrives in the first `--json` event: `{"type":"session","sessionId":"session-<uuid>","cwd":…}` **[V smoke]**; `final` event carries `reason.kind` + answer text **[V smoke]** |
 
-Two semantics to confirm with the first real runs (phase 0, not blocking design):
-where the session id appears in the event stream, and that `--approval-policy never`
-blocks-and-reports rather than silently allowing (A04 says fail-closed; that was a
-different flag path).
+The worker's session persists under `~/.dsh/sessions/<slug-of-cwd>/` — the slug is the
+worker's cwd, so the broker *knows* where a worker's transcript lives the moment the run
+starts **[V smoke]**. That is also the hook for phase 1.5: a GUI session opened at the
+worker's cwd sees the same store.
+
+### Worker model config (how headless reaches Strata) **[V smoke]**
+
+Headless ships with an empty patch layer, so it has no providers until you give it one.
+The recipe, copied from the web/desktop profile pattern
+(`~/.dsh/profiles/web/cordis.patch.yml`): patch `llm-pi-ai` in
+`~/.dsh/profiles/headless/cordis.patch.yml` with provider `local` (api
+`openai-completions`, `baseURL: http://127.0.0.1:8080/v1`, model + context window as
+served), plus `agent-default-model` pointing at it. The key travels in
+`apiKeyEnv: LOCAL_API_KEY`; the broker should inject it per spawn from
+`strata launch --show-key` (verified: Strata returns 401 without the key, 200 with it).
+One consequence for the adapter: each harness run is keyed by its *cwd*, so one worktree
+per worker gives clean session separation for free.
 
 Mid-turn `worker_send` has no DSH headless flag — turn-boundary delivery only, which is
 the accepted v1 behavior.
@@ -191,12 +207,19 @@ the accepted v1 behavior.
 0. **Quality gate, no code.** Five task classes (bulk grep+summarize, test triage,
    mechanical rename, doc writing, hard reasoning) run by hand through
    `dsh --profile headless` against Strata; plus two free measurements: where the
-   session id appears in `--json` events, and `--approval-policy never` behavior on a
-   would-be approval. Only DSH is installed on the test machine today, so this runs
-   first. Preconditions verified 2026-11-11: Strata serving `qwen3.8-flash-next-iq3_s`
+   session id appears in `--json` events **[V — resolved, first event]**, and
+   `--approval-policy never` behavior on a would-be approval (in flight). Only DSH is
+   installed on the test machine today, so this runs first. Preconditions verified
+   2026-11-11: Strata serving `qwen3.8-flash-next-iq3_s`
    at 127.0.0.1:8080, 128k context, API key on (`/health` ok,
    `strata launch --status`: `iq3_s-128k ready`). Workers will share the server that
    serves the orchestrator, so phase 0 runs one task at a time.
+   Fixtures + runner live at `integrations/worker-broker/phase0/`: a small seeded Python
+   package (`fixtures/acme/`) with exactly one real bug (leap-year February proration),
+   one order-dependent flaky test, seven `audit()` call sites and `widget_id` rename
+   targets, all verified against the baseline before any worker saw them (`run-tests.sh`
+   is hermetic — vendored pytest, no system install). Smoke passed 2026-11-11:
+   `exit=0`, 12 s, 18 events, session dir created under the worker's cwd slug.
 1. **Broker MVP, DSH adapter only**: daemon + shim, start/status/events/report/
    send(queued)/stop, worktrees, transcript mirror, notifications via the monitor, one
    concurrent worker. Exit criterion: Opus runs a 3-worker refactor batch unattended
@@ -231,14 +254,19 @@ the accepted v1 behavior.
 - **DSH external session channel: resolved.** Headless `--session-id` resume +
   `--permission-mode`/`--approval-policy` leash + `--json` event stream, verified from
   the CLI's own help (2026-11-11). No need for the web-profile session API in phase 1.
+- **DSH worker events + config: measured (smoke, 2026-11-11).** Session id in the first
+  `--json` event; event vocabulary `session/status/thinking/tool_call/tool_result/text/
+  final`; worker sessions keyed by cwd slug under `~/.dsh/sessions/`; headless needs the
+  `llm-pi-ai` provider patch + `LOCAL_API_KEY` at spawn (from `strata launch --show-key`).
 
 ## Still open
 
 1. **Monitor reliability**: confirm the Claude Code plugin monitor actually injects into
    a live session (docs list it as a component; behavior needs a phase-1 spike). Fallback
    is already designed: cursor polling.
-2. **Session-id discovery + `--approval-policy never` semantics**: two one-run
-   measurements folded into phase 0; neither changes the design either way.
+2. **`--approval-policy never` semantics**: one probe run (`approval_probe` in the
+   phase-0 batch) — expect fail-closed, not silent allow. Session-id discovery resolved
+   in 0.5.
 3. **Where DSH declares MCP servers**: the `dsh-mcp-resources` bundle is installed in
    the headless and web profiles, but the config schema has no `mcp` key — the
    declaration site (bundle config? cordis contribution? workspace file?) is a
