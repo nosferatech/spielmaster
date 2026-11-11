@@ -1,8 +1,10 @@
 # Worker broker design — swappable local harnesses as Claude Code subagents
 
-Draft 0.2, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
+Draft 0.3, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
 live in `integrations/worker-broker/`. v0.1 lived in the Strata checkout's scratch area;
 this repo is the right home — the broker is harness-neutral by design.
+0.3: verified the `dsh headless` flag contract (resume, leash, `--json` events); DSH
+adapter sketch added.
 
 ## The problem in one paragraph
 
@@ -123,10 +125,10 @@ yet run; **[U]** unconfirmed assumption — verify when writing that adapter.
 | Capability | DSH | Qwen Code | Codex CLI | Goose |
 |---|---|---|---|---|
 | Headless one-shot turn | `dsh headless "task"` **[V]** (help: "answer one task, print the result, and exit") | headless `-p` **[D]** | `codex exec` **[D]** | `goose run` **[U]** (docs reorg; CLI page 404s) |
-| Session / resume | durable sessions; `dsh tui --resume <session>` **[V]**; headless resume **[U]** | continue/resume + daemon sessions **[D]** | `exec resume <id>` **[U]** (syntax) | session store **[U]** |
+| Session / resume | headless resume: `--session-id <id>` **[V]** ("adopt the persisted Session with this id"; id discovery from the run **[U]** — one run to confirm) | continue/resume + daemon sessions **[D]** | `exec resume <id>` **[U]** (syntax) | session store **[U]** |
 | Live mid-turn injection | inside DSH yes **[V]** (a running DSH session steers children at step boundaries); from outside: via web-profile/ACP **[U]** | daemon REST + ACP bridge + permission mediation pages exist **[D]** | none **[D]** | none **[D]** |
-| Unattended permission | profiles; fail-closed without answerer **[V]** (A04) | approval mode + sandbox **[D]** | `--sandbox workspace-write`, approval policy **[D]** | extension access controls **[D]** |
-| Machine-readable output | headless prints result; session records **[V-partial]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
+| Unattended permission | per-run `--permission-mode <preset>` + `--approval-policy ask\|never`, `--add-dir <path>` (their example: sharing `/repo/.git`) **[V flags]**; fail-closed without answerer **[V]** (A04) | approval mode + sandbox **[D]** | `--sandbox workspace-write`, approval policy **[D]** | extension access controls **[D]** |
+| Machine-readable output | `--json`: newline-delimited run events on stdout **[V flag; line shape next run]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
 | Native sub-tree under the worker | yes **[V]** | SubAgents **[D]** | no | recipes **[U]** |
 | Human view of the conversation | DSH web GUI, e.g. `http://127.0.0.1:3081` **[V running]** | daemon + TUI **[D]** | TUI `resume` **[D]** | Desktop **[D]** |
 | Wire to Strata | profile, in use today **[V]** | OpenAI-compatible **[D]** | `/v1/responses`, built for it (Strata `docs/DETAILS.md:872`) **[V]** | OpenAI-compatible provider **[D]** |
@@ -163,11 +165,33 @@ The daemon keeps a semaphore sized to the Strata server: read `--parallel N` / c
 config via `strata_status`; refuse `worker_start` past N with a clear "engine full"
 error. Engine health stays a separate mechanism (Strata's MCP already answers it).
 
+## Adapter sketch: DSH (contract verified from `dsh --profile headless --help`, 2026-11-11)
+
+The DSH adapter is almost embarrassingly thin — the broker's concepts map 1:1 onto flags:
+
+| Broker concept | DSH headless |
+|---|---|
+| turn 1 | `dsh --profile headless --json --permission-mode <preset> --approval-policy never --add-dir <worktree>/.git - ` (task on stdin; answer → stdout, diagnostics → stderr) |
+| follow-up turn (resume) | `dsh --profile headless --json --session-id <id> …` — "adopt the persisted Session with this id" |
+| leash (`worker_start`) | `--permission-mode` preset + `--approval-policy never`; `--add-dir` for whitelisted extras (their own example shares `/repo/.git`) |
+| transcript feed | `--json` newline-delimited run events on stdout → mirrored to `transcript.jsonl` |
+| worker identity | the DSH session id (discovery from the run: one `--json` event should carry it — confirm in phase 0) |
+
+Two semantics to confirm with the first real runs (phase 0, not blocking design):
+where the session id appears in the event stream, and that `--approval-policy never`
+blocks-and-reports rather than silently allowing (A04 says fail-closed; that was a
+different flag path).
+
+Mid-turn `worker_send` has no DSH headless flag — turn-boundary delivery only, which is
+the accepted v1 behavior.
+
 ## Phases
 
 0. **Quality gate, no code.** Five task classes (bulk grep+summarize, test triage,
-   mechanical rename, doc writing, hard reasoning) run by hand through `dsh headless`
-   against Strata. Only DSH is installed on the test machine today, so this runs first.
+   mechanical rename, doc writing, hard reasoning) run by hand through
+   `dsh --profile headless` against Strata; plus two free measurements: where the
+   session id appears in `--json` events, and `--approval-policy never` behavior on a
+   would-be approval. Only DSH is installed on the test machine today, so this runs first.
 1. **Broker MVP, DSH adapter only**: daemon + shim, start/status/events/report/
    send(queued)/stop, worktrees, transcript mirror, notifications via the monitor, one
    concurrent worker. Exit criterion: Opus runs a 3-worker refactor batch unattended
@@ -191,13 +215,14 @@ error. Engine health stays a separate mechanism (Strata's MCP already answers it
   other harness orchestrators play nice. (2026-11-11, user)
 - **Tokens**: report when a harness exposes usage, null otherwise — no invented numbers.
   (2026-11-11, user)
+- **DSH external session channel: resolved.** Headless `--session-id` resume +
+  `--permission-mode`/`--approval-policy` leash + `--json` event stream, verified from
+  the CLI's own help (2026-11-11). No need for the web-profile session API in phase 1.
 
 ## Still open
 
-1. **DSH external session channel** for phase 1: `dsh headless --resume <session>`
-   (does it exist? one-line check in the user's terminal: `dsh headless --help`) vs
-   driving the web-profile session API vs the ACP profile. Decides adapter size for the
-   resume turn; everything else works either way.
-2. **Monitor reliability**: confirm the Claude Code plugin monitor actually injects into
+1. **Monitor reliability**: confirm the Claude Code plugin monitor actually injects into
    a live session (docs list it as a component; behavior needs a phase-1 spike). Fallback
    is already designed: cursor polling.
+2. **Session-id discovery + `--approval-policy never` semantics**: two one-run
+   measurements folded into phase 0; neither changes the design either way.
