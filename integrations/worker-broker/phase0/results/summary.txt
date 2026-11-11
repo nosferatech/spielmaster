@@ -1,0 +1,3 @@
+smoke exit=0 secs=12 ndjson=18
+smoke exit=0 secs=10 ndjson=18
+task1 exit=0 secs=68 ndjson=23
