@@ -1,6 +1,6 @@
 # Worker broker design — swappable local harnesses as Claude Code subagents
 
-Draft 0.5, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
+Draft 0.6, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
 live in `integrations/worker-broker/`. v0.1 lived in the Strata checkout's scratch area;
 this repo is the right home — the broker is harness-neutral by design.
 0.3: verified the `dsh headless` flag contract (resume, leash, `--json` events); DSH
@@ -9,6 +9,11 @@ DSH web GUI as the worker conversation viewer; Strata serving verified live.
 0.5: phase 0 running — fixtures + runner under `integrations/worker-broker/phase0/`;
 headless worker reached Strata (smoke passed); `--json` line shape and session-id
 discovery measured; worker model-config recipe documented.
+0.6: phase 0 complete — all 6 runs exit 0, all tasks A/S-graded (scorecard below);
+`--approval-policy never` = auto-approve (probe wrote to /tmp unchallenged); MCP
+declaration resolved from upstream docs and **live-verified** end-to-end
+(`mcp__spike__pong` round-trip through a headless run); `tool_call` field shape
+corrected to `{callId, tool, input}`.
 
 ## The problem in one paragraph
 
@@ -132,7 +137,7 @@ yet run; **[U]** unconfirmed assumption — verify when writing that adapter.
 | Session / resume | headless resume: `--session-id <id>` **[V]**; id arrives in the *first* `--json` event `{"type":"session","sessionId":…,"cwd":…}` **[V smoke]** | continue/resume + daemon sessions **[D]** | `exec resume <id>` **[U]** (syntax) | session store **[U]** |
 | Live mid-turn injection | inside DSH yes **[V]** (a running DSH session steers children at step boundaries); from outside: via web-profile/ACP **[U]** | daemon REST + ACP bridge + permission mediation pages exist **[D]** | none **[D]** | none **[D]** |
 | Unattended permission | per-run `--permission-mode <preset>` + `--approval-policy ask\|never`, `--add-dir <path>` (their example: sharing `/repo/.git`) **[V flags]**; fail-closed without answerer **[V]** (A04) | approval mode + sandbox **[D]** | `--sandbox workspace-write`, approval policy **[D]** | extension access controls **[D]** |
-| Machine-readable output | `--json`: newline-delimited events — vocabulary observed: `session`, `status`, `thinking`, `tool_call`, `tool_result`, `text`, `final` **[V smoke]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
+| Machine-readable output | `--json`: newline-delimited events — vocabulary observed: `session`, `status`, `thinking`, `tool_call`, `tool_result`, `text`, `final`; `tool_call` carries `{callId, tool, input}` (not name/args), MCP tools appear as tool `mcp__<server>__<tool>` **[V]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
 | Native sub-tree under the worker | yes **[V]** | SubAgents **[D]** | no | recipes **[U]** |
 | Human view of the conversation | DSH web GUI `http://127.0.0.1:3081` **[V running]**; session store shared across profiles, keyed by workspace path (`~/.dsh/sessions/<workspace-slug>/session-<uuid>`) **[V layout]** — whether the GUI renders a *headless* session **[U spike 1.5]** | daemon + TUI **[D]** | TUI `resume` **[D]** | Desktop **[D]** |
 | Wire to Strata | profile, in use today **[V]** | OpenAI-compatible **[D]** | `/v1/responses`, built for it (Strata `docs/DETAILS.md:872`) **[V]** | OpenAI-compatible provider **[D]** |
@@ -208,7 +213,8 @@ the accepted v1 behavior.
    mechanical rename, doc writing, hard reasoning) run by hand through
    `dsh --profile headless` against Strata; plus two free measurements: where the
    session id appears in `--json` events **[V — resolved, first event]**, and
-   `--approval-policy never` behavior on a would-be approval (in flight). Only DSH is
+   `--approval-policy never` behavior on a would-be approval **[V — resolved]**:
+   auto-approve, not fail-closed (probe wrote `/tmp` unchallenged). Only DSH is
    installed on the test machine today, so this runs first. Preconditions verified
    2026-11-11: Strata serving `qwen3.8-flash-next-iq3_s`
    at 127.0.0.1:8080, 128k context, API key on (`/health` ok,
@@ -220,6 +226,20 @@ the accepted v1 behavior.
    targets, all verified against the baseline before any worker saw them (`run-tests.sh`
    is hermetic — vendored pytest, no system install). Smoke passed 2026-11-11:
    `exit=0`, 12 s, 18 events, session dir created under the worker's cwd slug.
+   Full batch passed 2026-11-11 — 6/6 `exit=0`, strictly one at a time, no timeout hit:
+
+   | run | s | ev | grade vs seeded expectations |
+   |---|---|---|---|
+   | smoke | 12 | 18 | pass |
+   | task1 grep+summarize | 68 | 23 | A — all 5 sites, file:line, pricing flagged |
+   | task2 test triage | 306 | 44 | S — leap bug judged real, 308 independently recomputed; audit test proven a *deterministic* order dependency (sharper than the fixture's own "flaky" label); tree untouched as instructed |
+   | task3 mechanical rename | 637 | 97 | S — 17 sites/4 files incl. JSON keys; docstrings/comments left; suite result identical to baseline (behavior-preserving) |
+   | task4 doc from source | 399 | 113 | S — claims verified by running the classes; no-alias hard-break finding; w→p id translator proposed |
+   | task5 find+fix bug | 84 | 65 | S — minimal 2-line fix using the module's own `is_leap`; target test flips green, unrelated failure left red |
+   | approval_probe | 10 | 18 | verdict: `never` auto-approves — safety must come from worktree + sandbox flags, not the approval layer |
+
+   Local Qwen over the DSH channel clears the gate: DSH stays the first adapter;
+   phase 1 can start.
 1. **Broker MVP, DSH adapter only**: daemon + shim, start/status/events/report/
    send(queued)/stop, worktrees, transcript mirror, notifications via the monitor, one
    concurrent worker. Exit criterion: Opus runs a 3-worker refactor batch unattended
@@ -228,9 +248,20 @@ the accepted v1 behavior.
    adapter (tests the lowest-common-denominator path). A harness swap must not touch the
    MCP surface, the plugin, or any task text.
 1.5. **DSH as second orchestrator** (user's ask, after 1): register the broker's MCP
-   shim in DSH — the headless and web profiles already bundle
-   `@deepseek-ai/dsh-mcp-resources` **[V]**; where servers are *declared* is not in the
-   config schema **[U spike]**. Then run the fleet e2e from inside a DSH GUI session:
+   shim in DSH. Resolved from upstream docs (deepseek-harness repo,
+   `packages/mcp/mcp-client/README.md`, `docs/user/guide/mcp-memory.md`): servers are
+   declared by adding one `@deepseek-ai/dsh-mcp-client` entry per server to a profile's
+   `cordis.patch.yml` — the same layer that already points headless at Strata — with
+   `{serverName, transport: stdio, command, args, env}`; tools then appear as
+   `mcp__<serverName>__<tool>`. `dsh-mcp-resources` (bundled everywhere **[V]**) only
+   reads resources from already-declared servers; `dsh-mcp-client` itself is
+   config-empty until a row is added. A `mcp-spike` profile copy with a stdio Python
+   server parses clean in `--dump-config`, and the live round-trip passed 2026-11-11:
+   a headless run called `mcp__spike__pong {"n":"42"}`, the 40-line stdlib server
+   answered `PONG 42`, and the final event carried it verbatim (13 events, exit 0)
+   **[V]**. Note: the stdio bridge scrubs `KEY|PASSWORD|SECRET|TOKEN`-style
+   ambient vars from child envs; pass needed vars in the row's `config.env`.
+   Then run the fleet e2e from inside a DSH GUI session:
    proves orchestrator-side harness neutrality (same MCP surface served two harnesses)
    and gives the human a real viewer: worker sessions live in the shared session store
    keyed by workspace, so the GUI may show them directly **[U spike]**; else the
@@ -258,16 +289,22 @@ the accepted v1 behavior.
   `--json` event; event vocabulary `session/status/thinking/tool_call/tool_result/text/
   final`; worker sessions keyed by cwd slug under `~/.dsh/sessions/`; headless needs the
   `llm-pi-ai` provider patch + `LOCAL_API_KEY` at spawn (from `strata launch --show-key`).
+- **Phase 0 passed the quality gate (2026-11-11).** 6/6 runs exit 0; every task graded
+  A or S against seeded expectations (scorecard in Phases §0); the local model handled
+  triage *and* a correct minimal bug fix — DSH adapter first stands.
+- **`--approval-policy never` = auto-approve**, not fail-closed (probe write to /tmp
+  went through). Worker containment must be worktree discipline + sandbox-mode flags,
+  not the approval layer.
+- **DSH MCP declaration = one `@deepseek-ai/dsh-mcp-client` entry per server in the
+  profile's `cordis.patch.yml`** (stdio: command/args/env; tools as
+  `mcp__<server>__<tool>`); live-verified via the pong spike (2026-11-11). The broker
+  shim will be served to DSH-side orchestrators through this same layer.
 
 ## Still open
 
 1. **Monitor reliability**: confirm the Claude Code plugin monitor actually injects into
    a live session (docs list it as a component; behavior needs a phase-1 spike). Fallback
    is already designed: cursor polling.
-2. **`--approval-policy never` semantics**: one probe run (`approval_probe` in the
-   phase-0 batch) — expect fail-closed, not silent allow. Session-id discovery resolved
-   in 0.5.
-3. **Where DSH declares MCP servers**: the `dsh-mcp-resources` bundle is installed in
-   the headless and web profiles, but the config schema has no `mcp` key — the
-   declaration site (bundle config? cordis contribution? workspace file?) is a
-   phase-1.5 spike. (DSH authors may know offhand.)
+2. **GUI viewer for headless worker sessions**: sessions are keyed by cwd slug, so a
+   GUI session opened at a worker's worktree sees the same store; whether headless
+   sessions render live in the web GUI is untested (phase-1.5 spike).
