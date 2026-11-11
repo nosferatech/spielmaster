@@ -1,10 +1,11 @@
 # Worker broker design — swappable local harnesses as Claude Code subagents
 
-Draft 0.3, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
+Draft 0.4, 2026-11-11. Home: `spielmaster` (agent/harness experiments). Prototype will
 live in `integrations/worker-broker/`. v0.1 lived in the Strata checkout's scratch area;
 this repo is the right home — the broker is harness-neutral by design.
 0.3: verified the `dsh headless` flag contract (resume, leash, `--json` events); DSH
-adapter sketch added.
+adapter sketch added. 0.4: phase 1.5 added — DSH as second orchestrator via MCP, with
+DSH web GUI as the worker conversation viewer; Strata serving verified live.
 
 ## The problem in one paragraph
 
@@ -130,7 +131,7 @@ yet run; **[U]** unconfirmed assumption — verify when writing that adapter.
 | Unattended permission | per-run `--permission-mode <preset>` + `--approval-policy ask\|never`, `--add-dir <path>` (their example: sharing `/repo/.git`) **[V flags]**; fail-closed without answerer **[V]** (A04) | approval mode + sandbox **[D]** | `--sandbox workspace-write`, approval policy **[D]** | extension access controls **[D]** |
 | Machine-readable output | `--json`: newline-delimited run events on stdout **[V flag; line shape next run]** | structured output + daemon API **[D]** | `--json` **[D]** | recipe `-p` JSON schema **[U]** |
 | Native sub-tree under the worker | yes **[V]** | SubAgents **[D]** | no | recipes **[U]** |
-| Human view of the conversation | DSH web GUI, e.g. `http://127.0.0.1:3081` **[V running]** | daemon + TUI **[D]** | TUI `resume` **[D]** | Desktop **[D]** |
+| Human view of the conversation | DSH web GUI `http://127.0.0.1:3081` **[V running]**; session store shared across profiles, keyed by workspace path (`~/.dsh/sessions/<workspace-slug>/session-<uuid>`) **[V layout]** — whether the GUI renders a *headless* session **[U spike 1.5]** | daemon + TUI **[D]** | TUI `resume` **[D]** | Desktop **[D]** |
 | Wire to Strata | profile, in use today **[V]** | OpenAI-compatible **[D]** | `/v1/responses`, built for it (Strata `docs/DETAILS.md:872`) **[V]** | OpenAI-compatible provider **[D]** |
 | License / activity | MIT, co-developed with Strata | Apache-2, pushed 2026-11-11 | Apache-2, pushed 2026-11-11 | Apache-2, pushed 2026-11-11 |
 
@@ -191,7 +192,11 @@ the accepted v1 behavior.
    mechanical rename, doc writing, hard reasoning) run by hand through
    `dsh --profile headless` against Strata; plus two free measurements: where the
    session id appears in `--json` events, and `--approval-policy never` behavior on a
-   would-be approval. Only DSH is installed on the test machine today, so this runs first.
+   would-be approval. Only DSH is installed on the test machine today, so this runs
+   first. Preconditions verified 2026-11-11: Strata serving `qwen3.8-flash-next-iq3_s`
+   at 127.0.0.1:8080, 128k context, API key on (`/health` ok,
+   `strata launch --status`: `iq3_s-128k ready`). Workers will share the server that
+   serves the orchestrator, so phase 0 runs one task at a time.
 1. **Broker MVP, DSH adapter only**: daemon + shim, start/status/events/report/
    send(queued)/stop, worktrees, transcript mirror, notifications via the monitor, one
    concurrent worker. Exit criterion: Opus runs a 3-worker refactor batch unattended
@@ -199,6 +204,14 @@ the accepted v1 behavior.
 2. **Swap proof**: Qwen Code adapter (daemon mode; tests live injection) and Codex
    adapter (tests the lowest-common-denominator path). A harness swap must not touch the
    MCP surface, the plugin, or any task text.
+1.5. **DSH as second orchestrator** (user's ask, after 1): register the broker's MCP
+   shim in DSH — the headless and web profiles already bundle
+   `@deepseek-ai/dsh-mcp-resources` **[V]**; where servers are *declared* is not in the
+   config schema **[U spike]**. Then run the fleet e2e from inside a DSH GUI session:
+   proves orchestrator-side harness neutrality (same MCP surface served two harnesses)
+   and gives the human a real viewer: worker sessions live in the shared session store
+   keyed by workspace, so the GUI may show them directly **[U spike]**; else the
+   `transcript.jsonl` mirror is the fallback viewer.
 3. Goose adapter only if its CLI contract settles; plugin packaging + status polish.
 
 ## Decisions log
@@ -226,3 +239,7 @@ the accepted v1 behavior.
    is already designed: cursor polling.
 2. **Session-id discovery + `--approval-policy never` semantics**: two one-run
    measurements folded into phase 0; neither changes the design either way.
+3. **Where DSH declares MCP servers**: the `dsh-mcp-resources` bundle is installed in
+   the headless and web profiles, but the config schema has no `mcp` key — the
+   declaration site (bundle config? cordis contribution? workspace file?) is a
+   phase-1.5 spike. (DSH authors may know offhand.)
